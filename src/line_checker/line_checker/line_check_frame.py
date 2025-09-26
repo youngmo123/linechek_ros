@@ -1005,19 +1005,67 @@ def line_check_sobel(frame, M, Minv, LT):
 #video_file = 'project'
 
 def example():
-    cap = cv.VideoCapture('resource/test_video/REC_20250703_123827_1.avi')
-
+    import os
+    import rclpy
+    from rclpy.node import Node
+    from sensor_msgs.msg import Image
+    from cv_bridge import CvBridge
+    import threading
+    
+    # ROS2 초기화 (도메인 ID 10 사용)
+    os.environ['ROS_DOMAIN_ID'] = '10'
+    rclpy.init()
+    
+    class VideoSubscriber(Node):
+        def __init__(self, topic_name: str = 'my_camera/node'):
+            super().__init__('line_check_subscriber')
+            
+            self.bridge = CvBridge()
+            self.current_frame = None
+            self.frame_lock = threading.Lock()
+            
+            self.subscription = self.create_subscription(
+                Image,
+                topic_name,
+                self.image_callback,
+                10
+            )
+            
+            self.get_logger().info(f'Line Check subscriber started, listening to: {topic_name}')
+        
+        def image_callback(self, msg):
+            try:
+                # ROS2 Image 메시지를 OpenCV 프레임으로 변환
+                cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+                with self.frame_lock:
+                    self.current_frame = cv_image.copy()
+            except Exception as e:
+                self.get_logger().error(f"Error converting ROS2 image: {str(e)}")
+        
+        def get_latest_frame(self):
+            with self.frame_lock:
+                return self.current_frame.copy() if self.current_frame is not None else None
+    
+    # ROS2 subscriber 생성 
+    video_subscriber = VideoSubscriber('my_camera/node')
+    
     LT = LaneTracker(margin=50)
-    #img = cv.imread('lane.jpg')
 
-    # Manually turn car detection on or off
-    CAR_DETECTION = False
-
-
-    if (cap.isOpened() == False):
-        print("Error opening video stream or file")
-
-    ret, frame = cap.read()
+    # 첫 프레임을 받을 때까지 대기
+    print("Waiting for first frame from ROS2 topic...")
+    timeout_count = 0
+    while timeout_count < 50:  # 최대 5초 대기
+        rclpy.spin_once(video_subscriber, timeout_sec=0.1)
+        frame = video_subscriber.get_latest_frame()
+        if frame is not None:
+            break
+        timeout_count += 1
+    
+    if frame is None:
+        print("Error: Could not receive frames from ROS2 topic")
+        video_subscriber.destroy_node()
+        rclpy.shutdown()
+        return
 
     # If challenge video is played -> Define different points for transformation 
 
@@ -1037,17 +1085,71 @@ def example():
     ])
     M = warp_M(src, dst)
     Minv = Re_warp(src, dst)
+    
+    # 다각형 좌표 시각화 함수 추가
+    def draw_polygon_coordinates(img, src_points, dst_points, show_both=True):
+        """다각형 좌표를 시각화하는 함수"""
+        img_vis = img.copy()
+        
+        if show_both:
+            # 원본 이미지에 src 포인트 그리기 (녹색)
+            src_polygon = np.array(src_points, dtype=np.int32)
+            cv2.polylines(img_vis, [src_polygon], True, (0, 255, 0), 3)
+            for i, point in enumerate(src_points):
+                cv2.circle(img_vis, (int(point[0]), int(point[1])), 8, (0, 255, 0), -1)
+                cv2.putText(img_vis, f'S{i}', (int(point[0])-10, int(point[1])-15), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        return img_vis
+    
+    # 첫 번째 프레임에서 다각형 좌표 상세 시각화
+    frame_with_polygons = draw_polygon_coordinates(frame, src, dst)
+    
+    # 좌표 정보를 추가로 표시
+    cv2.putText(frame_with_polygons, 'Source Polygon (Green)', (10, 30), 
+               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    
+    # 각 좌표점 정보 출력
+    for i, point in enumerate(src):
+        text = f'S{i+1}: ({int(point[0])}, {int(point[1])})'
+        cv2.putText(frame_with_polygons, text, (10, 60 + i*25), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    
+    cv2.imshow('Polygon Coordinates Visualization', frame_with_polygons)
+    
+    # 콘솔에 상세 정보 출력
+    print("=== 차선 인식 다각형 좌표 ===")
+    print("Source Points (원본 이미지 좌표):")
+    for i, (x, y) in enumerate(src):
+        print(f"  S{i+1}: ({x:.1f}, {y:.1f}) -> ({x/width*100:.1f}% width, {y/height*100:.1f}% height)")
+    
+    print("\nDestination Points (변환 후 좌표):")
+    for i, (x, y) in enumerate(dst):
+        print(f"  D{i+1}: ({x:.1f}, {y:.1f}) -> ({x/width*100:.1f}% width, {y/height*100:.1f}% height)")
+    
+    print("\n창에서 아무 키나 누르면 차선 인식을 시작합니다...")
+    cv2.waitKey(0)  # 키를 누를 때까지 대기
+    cv2.destroyWindow('Polygon Coordinates Visualization')
 
     prev_time = 0
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    delay = int(1000 / fps)
+    show_polygon_overlay = False
+    print("Line detection started. Press 'q' to quit, 'p' to toggle polygon overlay...")
 
-    while(cap.isOpened()):
-        ret, frame = cap.read()
+    while rclpy.ok():
+        rclpy.spin_once(video_subscriber, timeout_sec=0.1)
+        
+        frame = video_subscriber.get_latest_frame()
         if (frame is None):
-            break
-        frame = line_check(frame, M, Minv, LT)
+            continue
+        # 다각형 오버레이를 표시할지
+        if show_polygon_overlay:
+            frame_with_polygons = draw_polygon_coordinates(frame, src, dst)
+            cv2.putText(frame_with_polygons, "POLYGON OVERLAY ON", (10, 90),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            frame = line_check(frame_with_polygons, M, Minv, LT)
+        else:
+            frame = line_check(frame, M, Minv, LT)
 
         curr_time = time.time()
         fps = 1.0 / (curr_time - prev_time) if prev_time else 0
@@ -1055,17 +1157,30 @@ def example():
         #frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
         cv.putText(frame, f"FPS: {fps:.1f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-        cv.imshow('Frame', frame)
+        cv.imshow('Line Detection', frame)
 
+        # UI에 정보 추가
+        if show_polygon_overlay:
+            cv.putText(frame, "Polygon Overlay ON", (10, 60),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        cv.imshow('Line Detection', frame)
 
-        if ret == True:   
-            if cv.waitKey(25) & 0xFF == ord('q'):
-                break
-        else:
+        key = cv.waitKey(25) & 0xFF
+        if key == ord('q'):
             break
+        elif key == ord('p'):
+            show_polygon_overlay = not show_polygon_overlay
+            print(f"Polygon overlay: {'ON' if show_polygon_overlay else 'OFF'}")
 
-    # When everything done, release the video capture object
-    cap.release()
-    cv.destroyAllWindows()
+    # 정리
+    try:
+        video_subscriber.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+    except:
+        pass
+    finally:
+        cv.destroyAllWindows()
 if __name__ == "__main__":
     example()
