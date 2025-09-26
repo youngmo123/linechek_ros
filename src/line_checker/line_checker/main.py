@@ -481,7 +481,7 @@ def main():
     print("=== Lane Detection Console Mode ===")
     print("Available modules: line_check, line_check_sobel")
     print("Using ROS topic: my_camera/node")
-    print("Performance optimized: YOLO running every 5 frames")
+    print("Using original configuration")
     print("Press Ctrl+C to exit")
     
     line_check_msg = MSG_Line_Check()
@@ -587,17 +587,15 @@ def run_console_lane_detection(module_name, line_check_msg, video_publisher):
     
     M = line_check_module.warp_M(src, dst)
     Minv = line_check_module.Re_warp(src, dst)
-    LT = LaneTracker(nwindows=6, margin=40, minimum=25)  # 속도 향상을 위한 최적화
+    LT = LaneTracker(nwindows=9, margin=50, minimum=30)  # 원래 설정으로 복원
     
     print("Line detection started. Press Ctrl+C to stop...")
     
-    # 성능 최적화를 위한 초기화
+    # 기본 초기화
     prev_time = time.time()
-    yolo_model = None
-    yolo_sample_count = 0
-    YOLO_SAMPLE_INTERVAL = 5  # YOLO를 5프레임마다만 실행 (더 줄임)
     
-    # YOLO 모델 로드 (한 번만)
+    # YOLO 모델 로드
+    yolo_model = None
     try:
         from ultralytics import YOLO
         model_path = get_resource_path('LC_resource/best.pt')
@@ -611,14 +609,9 @@ def run_console_lane_detection(module_name, line_check_msg, video_publisher):
     
     frame_count = 0
         
-    # 스피닝을 더 효율적으로 최적화
-    spin_count = 0
-    
     while rclpy.ok():
-        # 더 효율적인 ROS 스피닝 (더 적은 빈도로 spin)
-        spin_count += 1
-        if spin_count % 3 == 0:  # 3번에 1번만 spin (빠른 반응)
-            rclpy.spin_once(video_subscriber, timeout_sec=0.001)
+        # ROS 스피닝
+        rclpy.spin_once(video_subscriber, timeout_sec=0.01)
         
         frame = video_subscriber.get_latest_frame()
         if frame is None:
@@ -629,33 +622,13 @@ def run_console_lane_detection(module_name, line_check_msg, video_publisher):
         # 차선 인식 수행 (매 프레임)
         annotated_frame = line_check_func(frame, M, Minv, LT)
         
-        # YOLO 객체 탐지 최적화 (5프레임마다만 실행)
-        if yolo_model and yolo_sample_count % YOLO_SAMPLE_INTERVAL == 0:
+        # YOLO 객체 탐지 (매 프레임)
+        if yolo_model:
             try:
-                # 더 낮은 해상도로 YOLO 처리 (반 정도 크기로 리사이즈)
-                h, w = frame.shape[:2]
-                scale_factor = 0.5
-                small_h, small_w = int(h * scale_factor), int(w * scale_factor)
-                resized_frame = cv2.resize(frame, (small_w, small_h))
-                
-                # YOLO 처리 최소화 (더 엄격한 설정)
-                results = yolo_model(resized_frame, 
-                                   conf=0.6,        # 임계값 더 높여서 탐지량 줄임  
-                                   iou=0.5,         # NMS 더 강화
-                                   verbose=False,
-                                   agnostic_nms=True,  # 클래스별 NMS 대신 agnostic NMS 사용
-                                   max_det=10)       # 최대 탐지 결과 10개로 제한
-                
-                # 원본 크기에서 결과 처리
-                for r in results:
-                    if r.boxes is not None and len(r.boxes) > 0:
-                        # 좌표를 원본 크기로 다시 맞춤
-                        scaled_boxes = r.boxes.clone()
-                        scaled_boxes.xyxy = scaled_boxes.xyxy / scale_factor
-                        r.boxes = scaled_boxes
-                        break
+                results = yolo_model(frame, conf=0.3, iou=0.5, verbose=False)
                 
                 # 결과 처리
+                h, w = frame.shape[:2]
                 lane_polygon = np.array([[
                     (w * 0.2, h), (w * 0.8, h), (w * 0.6, h * 0.6), (w * 0.4, h * 0.6)
                 ]], dtype=np.int32)
@@ -665,8 +638,6 @@ def run_console_lane_detection(module_name, line_check_msg, video_publisher):
                     
             except Exception as e:
                 pass
-        
-        yolo_sample_count += 1
         
         # 화면 출력 최적화
         curr_time = time.time()
