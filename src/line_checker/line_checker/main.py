@@ -479,17 +479,39 @@ def main():
     rclpy.init()
 
     print("=== Lane Detection Console Mode ===")
-    print("Available modules: line_check, line_check_sobel")
+    print("Available detection modules:")
+    print("1. line_check (color-based)")
+    print("2. line_check_sobel (edge-based)") 
     print("Using ROS topic: my_camera/node")
     print("Using original configuration")
-    print("Press Ctrl+C to exit")
+    
+    # 사용자 선택 입력
+    while True:
+        try:
+            choice = int(input("Select detection method (1: line_check, 2: line_check_sobel): "))
+            if choice == 1:
+                module_name = "line_check"
+                print("Selected: line_check (color-based detection)")
+                break
+            elif choice == 2:
+                module_name = "line_check_sobel" 
+                print("Selected: line_check_sobel (edge-based detection)")
+                break
+            else:
+                print("Invalid choice. Please enter 1 or 2.")
+        except ValueError:
+            print("Invalid input. Please enter 1 or 2.")
+        except KeyboardInterrupt:
+            print("\nExiting...")
+            rclpy.shutdown()
+            return
     
     line_check_msg = MSG_Line_Check()
     video_publisher = VideoPublisher()
     
     # 콘솔 전용 실행 - Qt GUI 없이
     try:
-        run_console_lane_detection("line_check", line_check_msg, video_publisher)
+        run_console_lane_detection(module_name, line_check_msg, video_publisher)
     except KeyboardInterrupt:
         print("\nStopping lane detection...")
     except Exception as e:
@@ -510,8 +532,10 @@ def run_console_lane_detection(module_name, line_check_msg, video_publisher):
     # 동적 모듈 로딩
     if module_name == "line_check":
         line_check_func = line_check_module.line_check
+        print("Using color-based lane detection")
     elif module_name == "line_check_sobel":
         line_check_func = line_check_module.line_check_sobel
+        print("Using edge-based lane detection (Sobel)")
     else:
         print(f"Unknown module: {module_name}")
         return
